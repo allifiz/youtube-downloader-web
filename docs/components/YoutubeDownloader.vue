@@ -45,7 +45,7 @@ const fetchVideoInfo = async (url) => {
     }
 
     if (e instanceof TypeError) {
-      throw new Error('Backend API belum aktif. Jalankan project ini sebagai Node app, bukan hanya static GitHub Pages.')
+      throw new Error('Backend API belum aktif. Pastikan project dideploy ke hosting Node seperti Vercel, bukan static-only hosting.')
     }
 
     throw e
