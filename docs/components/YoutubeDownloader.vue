@@ -6,73 +6,96 @@ const loading = ref(false)
 const error = ref(null)
 const videoData = ref(null)
 
-const PIPED_API_INSTANCES = [
-  'https://api.piped.private.coffee',
-  'https://pipedapi.drgns.space',
-  'https://pipedapi.reallyaweso.me'
-]
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 const extractVideoId = (url) => {
-  const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i
+  const regex = /(?:youtube\.com\/(?:[^/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/|youtube\.com\/shorts\/)([^"&?/\s]{11})/i
   const match = url.match(regex)
   return match ? match[1] : null
 }
 
-const fetchWithFallback = async (videoId) => {
-  for (const instance of PIPED_API_INSTANCES) {
-    try {
-      const response = await fetch(`${instance}/streams/${videoId}`)
-      if (response.ok) {
-        return await response.json()
-      }
-    } catch (e) {
-      console.warn(`Failed to fetch from ${instance}:`, e)
+const buildApiUrl = (path, params = {}) => {
+  const query = new URLSearchParams(params).toString()
+  return `${API_BASE_URL}${path}${query ? `?${query}` : ''}`
+}
+
+const getErrorMessage = async (response) => {
+  const payload = await response.json().catch(() => null)
+  return payload?.error || `Request gagal dengan status ${response.status}`
+}
+
+const fetchVideoInfo = async (url) => {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 30_000)
+
+  try {
+    const response = await fetch(buildApiUrl('/api/info', { url }), {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' }
+    })
+
+    if (!response.ok) {
+      throw new Error(await getErrorMessage(response))
     }
+
+    return await response.json()
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('Request timeout. Coba lagi beberapa saat lagi.')
+    }
+
+    if (e instanceof TypeError) {
+      throw new Error('Backend API belum aktif. Jalankan project ini sebagai Node app, bukan hanya static GitHub Pages.')
+    }
+
+    throw e
+  } finally {
+    window.clearTimeout(timeout)
   }
-  throw new Error('All API instances failed. Please try again later.')
 }
 
 const handleSubmit = async () => {
   error.value = null
   videoData.value = null
-  const videoId = extractVideoId(videoUrl.value)
+
+  const trimmedUrl = videoUrl.value.trim()
+  const videoId = extractVideoId(trimmedUrl)
 
   if (!videoId) {
-    error.value = 'Invalid YouTube URL'
+    error.value = 'Link YouTube tidak valid.'
     return
   }
 
   loading.value = true
   try {
-    videoData.value = await fetchWithFallback(videoId)
+    videoData.value = await fetchVideoInfo(trimmedUrl)
   } catch (e) {
-    error.value = e.message
+    error.value = e.message || 'Gagal mengambil data video.'
   } finally {
     loading.value = false
   }
 }
 
-const videoStreams = computed(() => {
-  if (!videoData.value) return []
-  // Filter for video+audio streams, usually they have a 'url' and 'quality'
-  return videoData.value.videoStreams
-    .filter(s => s.videoOnly === false)
-    .sort((a, b) => {
-      const qA = parseInt(a.quality) || 0
-      const qB = parseInt(b.quality) || 0
-      return qB - qA
-    })
+const videoStreams = computed(() => videoData.value?.formats?.video || [])
+const audioStreams = computed(() => videoData.value?.formats?.audio || [])
+
+const buildDownloadUrl = (itag) => buildApiUrl('/api/download', {
+  url: videoUrl.value.trim(),
+  itag
 })
 
-const audioStreams = computed(() => {
-  if (!videoData.value) return []
-  return videoData.value.audioStreams
-    .sort((a, b) => b.bitrate - a.bitrate)
-})
+const formatMeta = (stream) => [
+  stream.container?.toUpperCase(),
+  stream.size
+].filter(Boolean).join(' · ')
 </script>
 
 <template>
   <div class="downloader-container">
+    <p class="usage-note">
+      Gunakan hanya untuk video milik sendiri, public domain, Creative Commons, atau konten yang kamu punya izin untuk simpan.
+    </p>
+
     <div class="input-group">
       <input
         v-model="videoUrl"
@@ -90,38 +113,39 @@ const audioStreams = computed(() => {
 
     <div v-if="videoData" class="result-container">
       <div class="video-info">
-        <img :src="videoData.thumbnailUrl" alt="Thumbnail" class="thumbnail" />
+        <img v-if="videoData.thumbnail" :src="videoData.thumbnail" alt="Thumbnail" class="thumbnail" />
         <div class="details">
           <h3>{{ videoData.title }}</h3>
-          <p>By {{ videoData.uploader }}</p>
+          <p>By {{ videoData.author }}</p>
         </div>
       </div>
 
       <div class="download-options">
         <div class="option-section">
-          <h4>Video</h4>
-          <div class="links-grid">
+          <h4>Video + Audio</h4>
+          <p v-if="videoStreams.length === 0" class="empty-state">
+            Tidak ada format video dengan audio yang tersedia.
+          </p>
+          <div v-else class="links-grid">
             <a v-for="stream in videoStreams"
-               :key="stream.url"
-               :href="stream.url"
-               target="_blank"
-               download
+               :key="stream.itag"
+               :href="buildDownloadUrl(stream.itag)"
                class="dl-link video">
-              {{ stream.quality }} ({{ stream.format }})
+              <span>{{ stream.label }}</span>
+              <small v-if="formatMeta(stream)" class="format-meta">{{ formatMeta(stream) }}</small>
             </a>
           </div>
         </div>
 
         <div class="option-section" v-if="audioStreams.length > 0">
-          <h4>Audio</h4>
+          <h4>Audio Only</h4>
           <div class="links-grid">
             <a v-for="stream in audioStreams"
-               :key="stream.url"
-               :href="stream.url"
-               target="_blank"
-               download
+               :key="stream.itag"
+               :href="buildDownloadUrl(stream.itag)"
                class="dl-link audio">
-              {{ Math.round(stream.bitrate / 1000) }}kbps ({{ stream.format }})
+              <span>{{ stream.label }}</span>
+              <small v-if="formatMeta(stream)" class="format-meta">{{ formatMeta(stream) }}</small>
             </a>
           </div>
         </div>
@@ -137,6 +161,13 @@ const audioStreams = computed(() => {
   border-radius: 12px;
   background-color: var(--vp-c-bg-soft);
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.usage-note {
+  max-width: 700px;
+  margin: 0 auto 1rem;
+  color: var(--vp-c-text-2);
+  font-size: 0.9rem;
 }
 
 .input-group {
@@ -233,6 +264,11 @@ const audioStreams = computed(() => {
   padding-bottom: 0.3rem;
 }
 
+.empty-state {
+  color: var(--vp-c-text-2);
+  font-size: 0.9rem;
+}
+
 .links-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -240,7 +276,9 @@ const audioStreams = computed(() => {
 }
 
 .dl-link {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   padding: 0.6rem;
   text-align: center;
   border-radius: 6px;
@@ -248,6 +286,12 @@ const audioStreams = computed(() => {
   font-weight: 500;
   font-size: 0.9rem;
   transition: background-color 0.2s;
+}
+
+.format-meta {
+  color: var(--vp-c-text-2);
+  font-weight: 400;
+  font-size: 0.75rem;
 }
 
 .dl-link.video {
@@ -269,9 +313,14 @@ const audioStreams = computed(() => {
 }
 
 @media (max-width: 640px) {
+  .input-group {
+    flex-direction: column;
+  }
+
   .video-info {
     flex-direction: column;
   }
+
   .thumbnail {
     width: 100%;
   }
